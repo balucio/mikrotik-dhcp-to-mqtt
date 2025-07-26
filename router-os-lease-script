@@ -1,0 +1,103 @@
+# DHCP Event Script for MikroTik with MQTT Publication (Seconds Remaining)
+# Usage: /ip dhcp-server set [find name="dhcp-server-name"] on-event=dhcp-lease-reporter-mqtt
+
+# --- Normalize Hostname Function ---
+:local normalizeHostname do={
+  :local name $1;
+  :local result "";
+  :local isInvalidChar true;
+  :for i from=0 to=([:len $name] - 1) do={
+    :local char [:pick $name $i];
+    :if ($i < 63) do={
+      :if ($char~"[a-zA-Z0-9]") do={
+        :set result ($result . $char);
+        :set isInvalidChar false;
+      } else={
+        :if (!$isInvalidChar) do={
+          :set result ($result . "-");
+          :set isInvalidChar true;
+        }
+      }
+    }
+  }
+  :if ($isInvalidChar && [:len $result] > 0) do={
+    :set result [:pick $result 0 ([:len $result]-1)];
+  }
+  :return $result;
+}
+
+# --- Script Entry Point ---
+# Expected environment variables from DHCP server:
+# leaseBound - set to "1" if bound, otherwise set to "0"
+# leaseServerName - DHCP server name
+# leaseActMAC - active mac address
+# leaseActIP - active IP address
+# lease-hostname - client hostname
+# lease-options - an array of received options
+
+# Start Execution
+
+:local clientHostname [ $normalizeHostname $"lease-hostname" ];
+
+# Fallback to MAC if hostname is empty after normalization
+:if ([:len $clientHostname] = 0) do={
+  :set clientHostname [$normalizeHostname $leaseActMAC];
+}
+
+:log debug "DHCP Script: Starting with Op: $leaseBound, Srv: $leaseServerName, IP: $leaseActIP, MAC: $leaseActMAC, Hostname: $clientHostname";
+
+# --- Event Mapping and Lease Duration Calculation ---
+:local mappedEventType "";
+:local leaseDurationSeconds "0"; # Expiring seconds
+
+:if ($leaseBound = 1) do={
+  :set mappedEventType "new";
+  
+  /ip dhcp-server
+  :local ttl [ get [ find name=$leaseServerName ] lease-time ];
+  :log debug "DHCP Script: Got TTL value $ttl for $leaseServerName";
+  :local hrs [:tonum [:pick $ttl 0 2]];
+  :local min [:tonum [:pick $ttl 3 5]];
+  :local sec [:tonum [:pick $ttl 6 8]];
+
+  :set leaseDurationSeconds [:tostr (($hrs*3600) + ($min*60) + $sec) ]; # to string for JSON
+
+} else={
+  :set mappedEventType "del";
+  :set leaseDurationSeconds "0"; # for deletion duration is 0
+}
+
+:log debug "DHCP Script: Lease will expire in $leaseDurationSeconds seconds";
+
+# Add domain name if defined
+/ip dhcp-server network {
+  :local domainName "";
+  :local networkIndex [:find address ~ "$leaseActIP"];
+  :if ([:typeof $networkIndex] = "num") do={
+    :set domainName [get $networkIndex domain];
+    :log debug "DHCP Script: Found domain $domainName";
+  }
+  :if ([:len $domainName] > 0) do={
+    :set clientHostname ($clientHostname . "." . $domainName);
+    :log debug "DHCP Script: FQDN $clientHostname";
+  }
+}
+
+# --- MQTT Configuration ---
+:local mqttBrokerName "mqtt-broker"; # Name sets in /iot mqtt brokers
+
+# --- Build JSON payload (as string) ---
+:local payload ("{");
+:set payload ($payload . "\"mac\":\"" . $leaseActMAC . "\",");
+:set payload ($payload . "\"ip\":\"" . $leaseActIP . "\",");
+:set payload ($payload . "\"hostname\":\"" . $clientHostname . "\",");
+:set payload ($payload . "\"event_type\":\"" . $mappedEventType . "\",");
+:set payload ($payload . "\"lease_duration_seconds\":" . $leaseDurationSeconds); # Send as number for backend simplicity
+:set payload ($payload . "}");
+
+# --- MQTT Topic ---
+:local mqttTopic ("dhcp/" . $mappedEventType . "/" . $leaseActMAC);
+
+# --- Publish MQTT Message ---
+/iot mqtt publish broker="$mqttBrokerName" topic="$mqttTopic" message="$payload";
+:log info ("DHCP Script Published " . $mappedEventType . " for " . $leaseActIP . " to MQTT topic " . $mqttTopic);
