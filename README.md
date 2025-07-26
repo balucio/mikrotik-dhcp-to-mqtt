@@ -11,12 +11,12 @@ Publish Mikrotik DHCP Lease on MQTT topic using the Mikrotik IOT Package
 
 This script will publish on the MQTT topic 
 
-dhcp/<event_type>/<leaseMAC> the following json data
-
+`dhcp/<event_type>/<leaseMAC>` the following json data
+```
 {
   "mac": <MAC address>,
   "ip" : <IPv4>,
   "event_type: {add|del},
   "lease_duration_seconds": <Lease duration in seconds>
 }
-
+```
